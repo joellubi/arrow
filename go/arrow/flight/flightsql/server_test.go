@@ -285,135 +285,6 @@ func (s *FlightSqlServerSuite) TestExecutePoll() {
 	s.Len(poll.GetInfo().Endpoint, 2)
 }
 
-func (s *FlightSqlServerSuite) TestSetSessionOptions() {
-	opts, err := flight.NewSessionOptionValues(map[string]any{
-		"foolong":                int64(123),
-		"bardouble":              456.0,
-		"lol_invalid":            "this won't get set",
-		"key_with_invalid_value": "lol_invalid",
-		"big_ol_string_list":     []string{"a", "b", "sea", "dee", " ", "  ", "geee", "(づ｡◕‿‿◕｡)づ"},
-	})
-	s.NoError(err)
-	res, err := s.cl.SetSessionOptions(context.TODO(), &flight.SetSessionOptionsRequest{SessionOptions: opts})
-	s.NoError(err)
-	s.NotNil(res)
-
-	expectedErrs := map[string]*flight.SetSessionOptionsResultError{
-		"lol_invalid":            {Value: flight.SetSessionOptionsResultErrorInvalidName},
-		"key_with_invalid_value": {Value: flight.SetSessionOptionsResultErrorInvalidValue},
-	}
-
-	errs := res.GetErrors()
-	s.Equal(len(expectedErrs), len(errs))
-
-	for key, val := range errs {
-		s.Equal(expectedErrs[key], val)
-	}
-}
-
-func (s *FlightSqlServerSuite) TestGetSetGetSessionOptions() {
-	ctx := context.TODO()
-	getRes, err := s.cl.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{})
-	s.NoError(err)
-	s.NotNil(getRes)
-	s.Len(getRes.SessionOptions, 0)
-
-	expectedOpts := map[string]any{
-		"foolong":            int64(123),
-		"bardouble":          456.0,
-		"big_ol_string_list": []string{"a", "b", "sea", "dee", " ", "  ", "geee", "(づ｡◕‿‿◕｡)づ"},
-	}
-
-	optionVals, err := flight.NewSessionOptionValues(expectedOpts)
-	s.NoError(err)
-	s.NotNil(optionVals)
-
-	setRes, err := s.cl.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals})
-	s.NoError(err)
-	s.NotNil(setRes)
-	s.Empty(setRes.Errors)
-
-	getRes2, err := s.cl.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{})
-	s.NoError(err)
-	s.NotNil(getRes2)
-
-	opts := getRes2.GetSessionOptions()
-	s.Equal(3, len(opts))
-
-	s.Equal(expectedOpts["foolong"], opts["foolong"].GetInt64Value())
-	s.Equal(expectedOpts["bardouble"], opts["bardouble"].GetDoubleValue())
-	s.Equal(expectedOpts["big_ol_string_list"], opts["big_ol_string_list"].GetStringListValue().GetValues())
-}
-
-func (s *FlightSqlServerSuite) TestSetRemoveSessionOptions() {
-	ctx := context.TODO()
-	initialOpts := map[string]any{
-		"foolong":            int64(123),
-		"bardouble":          456.0,
-		"big_ol_string_list": []string{"a", "b", "sea", "dee", " ", "  ", "geee", "(づ｡◕‿‿◕｡)づ"},
-	}
-
-	optionVals, err := flight.NewSessionOptionValues(initialOpts)
-	s.NoError(err)
-	s.NotNil(optionVals)
-
-	setRes, err := s.cl.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals})
-	s.NoError(err)
-	s.NotNil(setRes)
-	s.Empty(setRes.Errors)
-
-	removeKeyOpts, err := flight.NewSessionOptionValues(map[string]any{
-		"foolong": nil,
-	})
-	s.NoError(err)
-	s.NotNil(removeKeyOpts)
-
-	setRes2, err := s.cl.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: removeKeyOpts})
-	s.NoError(err)
-	s.NotNil(setRes2)
-	s.Empty(setRes2.Errors)
-
-	getRes, err := s.cl.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{})
-	s.NoError(err)
-	s.NotNil(getRes)
-
-	opts := getRes.GetSessionOptions()
-	s.Equal(2, len(opts))
-
-	s.Equal(initialOpts["bardouble"], opts["bardouble"].GetDoubleValue())
-	s.Equal(initialOpts["big_ol_string_list"], opts["big_ol_string_list"].GetStringListValue().GetValues())
-}
-
-func (s *FlightSqlServerSuite) TestCloseSession() {
-	ctx := context.TODO()
-	initialOpts := map[string]any{
-		"foolong":            int64(123),
-		"bardouble":          456.0,
-		"big_ol_string_list": []string{"a", "b", "sea", "dee", " ", "  ", "geee", "(づ｡◕‿‿◕｡)づ"},
-	}
-
-	optionVals, err := flight.NewSessionOptionValues(initialOpts)
-	s.NoError(err)
-	s.NotNil(optionVals)
-
-	setRes, err := s.cl.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals})
-	s.NoError(err)
-	s.NotNil(setRes)
-	s.Empty(setRes.Errors)
-
-	closeRes, err := s.cl.CloseSession(ctx, &flight.CloseSessionRequest{})
-	s.NoError(err)
-	s.NotNil(closeRes)
-	s.Equal(flight.CloseSessionResultClosed, closeRes.GetStatus())
-
-	getRes, err := s.cl.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{})
-	s.NoError(err)
-	s.NotNil(getRes)
-
-	opts := getRes.GetSessionOptions()
-	s.Empty(opts)
-}
-
 type UnimplementedFlightSqlServerSuite struct {
 	suite.Suite
 
@@ -654,9 +525,178 @@ func (s *UnimplementedFlightSqlServerSuite) TestCloseSession() {
 	s.Equal("CloseSession not implemented", st.Message())
 }
 
+type FlightSqlServerSessionSuite struct {
+	suite.Suite
+
+	s  flight.Server
+	cl *flightsql.Client
+
+	sessionManager flight.ServerSessionManager
+}
+
+func (s *FlightSqlServerSessionSuite) SetupSuite() {
+	s.s = flight.NewServerWithMiddleware([]flight.ServerMiddleware{
+		flight.CreateServerMiddleware(flight.NewServerSessionMiddleware(s.sessionManager)),
+	})
+	srv := flightsql.NewFlightServer(&testServer{})
+	s.s.RegisterFlightService(srv)
+	s.s.Init("localhost:0")
+
+	go s.s.Serve()
+}
+
+func (s *FlightSqlServerSessionSuite) TearDownSuite() {
+	s.s.Shutdown()
+}
+
+func (s *FlightSqlServerSessionSuite) SetupTest() {
+	middleware := []flight.ClientMiddleware{
+		flight.NewClientCookieMiddleware(),
+	}
+	cl, err := flightsql.NewClient(s.s.Addr().String(), nil, middleware, dialOpts...)
+	s.Require().NoError(err)
+	s.cl = cl
+}
+
+func (s *FlightSqlServerSessionSuite) TearDownTest() {
+	s.Require().NoError(s.cl.Close())
+	s.cl = nil
+}
+
+func (s *FlightSqlServerSessionSuite) TestSetSessionOptions() {
+	opts, err := flight.NewSessionOptionValues(map[string]any{
+		"foolong":                int64(123),
+		"bardouble":              456.0,
+		"lol_invalid":            "this won't get set",
+		"key_with_invalid_value": "lol_invalid",
+		"big_ol_string_list":     []string{"a", "b", "sea", "dee", " ", "  ", "geee", "(づ｡◕‿‿◕｡)づ"},
+	})
+	s.NoError(err)
+	res, err := s.cl.SetSessionOptions(context.TODO(), &flight.SetSessionOptionsRequest{SessionOptions: opts})
+	s.NoError(err)
+	s.NotNil(res)
+
+	expectedErrs := map[string]*flight.SetSessionOptionsResultError{
+		"lol_invalid":            {Value: flight.SetSessionOptionsResultErrorInvalidName},
+		"key_with_invalid_value": {Value: flight.SetSessionOptionsResultErrorInvalidValue},
+	}
+
+	errs := res.GetErrors()
+	s.Equal(len(expectedErrs), len(errs))
+
+	for key, val := range errs {
+		s.Equal(expectedErrs[key], val)
+	}
+}
+
+func (s *FlightSqlServerSessionSuite) TestGetSetGetSessionOptions() {
+	ctx := context.TODO()
+	getRes, err := s.cl.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{})
+	s.NoError(err)
+	s.NotNil(getRes)
+	s.Len(getRes.SessionOptions, 0)
+
+	expectedOpts := map[string]any{
+		"foolong":            int64(123),
+		"bardouble":          456.0,
+		"big_ol_string_list": []string{"a", "b", "sea", "dee", " ", "  ", "geee", "(づ｡◕‿‿◕｡)づ"},
+	}
+
+	optionVals, err := flight.NewSessionOptionValues(expectedOpts)
+	s.NoError(err)
+	s.NotNil(optionVals)
+
+	setRes, err := s.cl.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals})
+	s.NoError(err)
+	s.NotNil(setRes)
+	s.Empty(setRes.Errors)
+
+	getRes2, err := s.cl.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{})
+	s.NoError(err)
+	s.NotNil(getRes2)
+
+	opts := getRes2.GetSessionOptions()
+	s.Equal(3, len(opts))
+
+	s.Equal(expectedOpts["foolong"], opts["foolong"].GetInt64Value())
+	s.Equal(expectedOpts["bardouble"], opts["bardouble"].GetDoubleValue())
+	s.Equal(expectedOpts["big_ol_string_list"], opts["big_ol_string_list"].GetStringListValue().GetValues())
+}
+
+func (s *FlightSqlServerSessionSuite) TestSetRemoveSessionOptions() {
+	ctx := context.TODO()
+	initialOpts := map[string]any{
+		"foolong":            int64(123),
+		"bardouble":          456.0,
+		"big_ol_string_list": []string{"a", "b", "sea", "dee", " ", "  ", "geee", "(づ｡◕‿‿◕｡)づ"},
+	}
+
+	optionVals, err := flight.NewSessionOptionValues(initialOpts)
+	s.NoError(err)
+	s.NotNil(optionVals)
+
+	setRes, err := s.cl.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals})
+	s.NoError(err)
+	s.NotNil(setRes)
+	s.Empty(setRes.Errors)
+
+	removeKeyOpts, err := flight.NewSessionOptionValues(map[string]any{
+		"foolong": nil,
+	})
+	s.NoError(err)
+	s.NotNil(removeKeyOpts)
+
+	setRes2, err := s.cl.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: removeKeyOpts})
+	s.NoError(err)
+	s.NotNil(setRes2)
+	s.Empty(setRes2.Errors)
+
+	getRes, err := s.cl.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{})
+	s.NoError(err)
+	s.NotNil(getRes)
+
+	opts := getRes.GetSessionOptions()
+	s.Equal(2, len(opts))
+
+	s.Equal(initialOpts["bardouble"], opts["bardouble"].GetDoubleValue())
+	s.Equal(initialOpts["big_ol_string_list"], opts["big_ol_string_list"].GetStringListValue().GetValues())
+}
+
+func (s *FlightSqlServerSessionSuite) TestCloseSession() {
+	ctx := context.TODO()
+	initialOpts := map[string]any{
+		"foolong":            int64(123),
+		"bardouble":          456.0,
+		"big_ol_string_list": []string{"a", "b", "sea", "dee", " ", "  ", "geee", "(づ｡◕‿‿◕｡)づ"},
+	}
+
+	optionVals, err := flight.NewSessionOptionValues(initialOpts)
+	s.NoError(err)
+	s.NotNil(optionVals)
+
+	setRes, err := s.cl.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals})
+	s.NoError(err)
+	s.NotNil(setRes)
+	s.Empty(setRes.Errors)
+
+	closeRes, err := s.cl.CloseSession(ctx, &flight.CloseSessionRequest{})
+	s.NoError(err)
+	s.NotNil(closeRes)
+	s.Equal(flight.CloseSessionResultClosed, closeRes.GetStatus())
+
+	getRes, err := s.cl.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{})
+	s.NoError(err)
+	s.NotNil(getRes)
+
+	opts := getRes.GetSessionOptions()
+	s.Empty(opts)
+}
+
 func TestBaseServer(t *testing.T) {
 	suite.Run(t, new(UnimplementedFlightSqlServerSuite))
 	suite.Run(t, new(FlightSqlServerSuite))
+	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: flight.NewServerSessionManager()})
+	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: flight.NewStatelessServerSessionManager()})
 }
 
 func TestServerSession(t *testing.T) {
@@ -699,19 +739,19 @@ func TestServerSession(t *testing.T) {
 	defer client.Close()
 
 	var (
-		header, trailer metadata.MD
-		session         flight.ServerSession
+		trailer metadata.MD
+		session flight.ServerSession
 	)
 
 	ctx := context.TODO()
 
-	// Get empty session; should create new session if one doesn't exist
-	_, err = client.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{}, grpc.Header(&header), grpc.Trailer(&trailer))
+	// Get empty session; should create new session since one doesn't exist
+	_, err = client.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{}, grpc.Trailer(&trailer))
 	require.NoError(t, err)
 
 	// Client should recieve cookie with new session ID
-	require.Len(t, header.Get("set-cookie"), 1)
-	require.Equal(t, "arrow_flight_session_id=how-now-brown-cow", header.Get("set-cookie")[0])
+	require.Len(t, trailer.Get("set-cookie"), 1)
+	require.Equal(t, "arrow_flight_session_id=how-now-brown-cow", trailer.Get("set-cookie")[0])
 
 	// Server should add the empty session to its internal store
 	session, err = store.Get("how-now-brown-cow")
@@ -724,11 +764,11 @@ func TestServerSession(t *testing.T) {
 	require.NotNil(t, optionVals)
 
 	// Add option to existing session
-	_, err = client.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals}, grpc.Header(&header), grpc.Trailer(&trailer))
+	_, err = client.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals}, grpc.Trailer(&trailer))
 	require.NoError(t, err)
 
-	// Server recieved and used session from existing client cookie, no need to set a new one
-	require.Len(t, header.Get("set-cookie"), 0)
+	// Server received and used session from existing client cookie, no need to set a new one
+	require.Len(t, trailer.Get("set-cookie"), 0)
 
 	// The option we set has been added to the server's state
 	session, err = store.Get("how-now-brown-cow")
@@ -738,12 +778,10 @@ func TestServerSession(t *testing.T) {
 	require.Contains(t, session.GetSessionOptions(), "hello")
 
 	// Close the existing session
-	_, err = client.CloseSession(ctx, &flight.CloseSessionRequest{}, grpc.Header(&header), grpc.Trailer(&trailer))
+	_, err = client.CloseSession(ctx, &flight.CloseSessionRequest{}, grpc.Trailer(&trailer))
 	require.NoError(t, err)
 
 	// Inform the client that the cookie should be deleted
-	//
-	// The cookie is in the gRPC trailer because the session may have been closed AFTER the initial headers were sent
 	require.Len(t, trailer.Get("set-cookie"), 1)
 	require.Equal(t, "arrow_flight_session_id=how-now-brown-cow; Max-Age=0", trailer.Get("set-cookie")[0])
 
@@ -752,13 +790,13 @@ func TestServerSession(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, session)
 
-	// Get the session; his should create a new session because we just closed the previous one
-	_, err = client.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{}, grpc.Header(&header), grpc.Trailer(&trailer))
+	// Get the session; this should create a new session because we just closed the previous one
+	_, err = client.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{}, grpc.Trailer(&trailer))
 	require.NoError(t, err)
 
 	// The client is informed to set a NEW cookie for the newly created session
-	require.Len(t, header.Get("set-cookie"), 1)
-	require.Equal(t, "arrow_flight_session_id=unique-new-york", header.Get("set-cookie")[0])
+	require.Len(t, trailer.Get("set-cookie"), 1)
+	require.Equal(t, "arrow_flight_session_id=unique-new-york", trailer.Get("set-cookie")[0])
 
 	// The new empty session has been added to the server's internal store
 	session, err = store.Get("unique-new-york")
@@ -767,7 +805,7 @@ func TestServerSession(t *testing.T) {
 	require.Empty(t, session.GetSessionOptions())
 
 	// Close the new session
-	_, err = client.CloseSession(ctx, &flight.CloseSessionRequest{}, grpc.Header(&header), grpc.Trailer(&trailer))
+	_, err = client.CloseSession(ctx, &flight.CloseSessionRequest{}, grpc.Trailer(&trailer))
 	require.NoError(t, err)
 
 	// Inform the client that the new session's cookie should be deleted
@@ -778,4 +816,81 @@ func TestServerSession(t *testing.T) {
 	session, err = store.Get("unique-new-york")
 	require.Error(t, err)
 	require.Nil(t, session)
+}
+
+func TestStatelessServerSession(t *testing.T) {
+	manager := flight.NewStatelessServerSessionManager()
+	middleware := flight.NewServerSessionMiddleware(manager)
+
+	srv := flight.NewServerWithMiddleware([]flight.ServerMiddleware{
+		flight.CreateServerMiddleware(middleware),
+	})
+	srv.RegisterFlightService(flightsql.NewFlightServer(&testServer{}))
+	srv.Init("localhost:0")
+
+	go srv.Serve()
+	defer srv.Shutdown()
+
+	client, err := flightsql.NewClient(
+		srv.Addr().String(),
+		nil,
+		[]flight.ClientMiddleware{
+			flight.NewClientCookieMiddleware(),
+		},
+		dialOpts...,
+	)
+	require.NoError(t, err)
+	defer client.Close()
+
+	var trailer metadata.MD
+
+	ctx := context.TODO()
+
+	// Get empty session; should create new session since one doesn't exist
+	_, err = client.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{}, grpc.Trailer(&trailer))
+	require.NoError(t, err)
+
+	// Client should recieve cookie with new session token. An empty session is serialized with zero bytes.
+	require.Len(t, trailer.Get("set-cookie"), 1)
+	require.Equal(t, "arrow_flight_session=", trailer.Get("set-cookie")[0])
+
+	optionVals, err := flight.NewSessionOptionValues(map[string]any{"hello": "world"})
+	require.NoError(t, err)
+	require.NotNil(t, optionVals)
+
+	// Add option to existing session
+	_, err = client.SetSessionOptions(ctx, &flight.SetSessionOptionsRequest{SessionOptions: optionVals}, grpc.Trailer(&trailer))
+	require.NoError(t, err)
+
+	// Session state has been modified, so we send a new cookie with the updated session contents
+	require.Len(t, trailer.Get("set-cookie"), 1)
+	require.Equal(t, `arrow_flight_session=ChAKBWhlbGxvEgcKBXdvcmxk`, trailer.Get("set-cookie")[0]) // base64 of binary '{"hello":"world"}' proto message
+
+	// Close the existing session
+	_, err = client.CloseSession(ctx, &flight.CloseSessionRequest{}, grpc.Trailer(&trailer))
+	require.NoError(t, err)
+
+	// Inform the client that the cookie should be deleted
+	//
+	// The cookie is in the gRPC trailer because the session may have been closed AFTER the initial headers were sent
+	require.Len(t, trailer.Get("set-cookie"), 1)
+	require.Equal(t, "arrow_flight_session=ChAKBWhlbGxvEgcKBXdvcmxk; Max-Age=0", trailer.Get("set-cookie")[0])
+
+	// Get the session; his should create a new session because we just closed the previous one
+	// Realistically no session is "created", this just happens because the client was told to drop the cookie
+	// in the last step.
+	_, err = client.GetSessionOptions(ctx, &flight.GetSessionOptionsRequest{}, grpc.Trailer(&trailer))
+	require.NoError(t, err)
+
+	// The client is informed to set a NEW cookie for the newly created empty session
+	require.Len(t, trailer.Get("set-cookie"), 1)
+	require.Equal(t, "arrow_flight_session=", trailer.Get("set-cookie")[0])
+
+	// Close the new session
+	_, err = client.CloseSession(ctx, &flight.CloseSessionRequest{}, grpc.Trailer(&trailer))
+	require.NoError(t, err)
+
+	// Inform the client that the new session's cookie should be deleted
+	require.Len(t, trailer.Get("set-cookie"), 1)
+	require.Equal(t, "arrow_flight_session=; Max-Age=0", trailer.Get("set-cookie")[0])
 }

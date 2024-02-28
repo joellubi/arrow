@@ -18,6 +18,7 @@ package flight
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -26,10 +27,12 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
-	SessionCookieName string = "arrow_flight_session_id"
+	SessionCookieName          string = "arrow_flight_session_id"
+	StatelessSessionCookieName string = "arrow_flight_session"
 )
 
 var (
@@ -55,9 +58,28 @@ func GetSessionFromContext(ctx context.Context) (ServerSession, error) {
 
 // Check the provided context for cookies in the incoming gRPC metadata.
 func GetSessionIDFromIncomingCookie(ctx context.Context) (string, error) {
+	cookie, err := GetIncomingCookieByName(ctx, SessionCookieName)
+	if err != nil {
+		return "", err
+	}
+
+	return cookie.Value, nil
+}
+
+// Check the provided context for cookies in the incoming gRPC metadata.
+func GetSessionFromIncomingCookie(ctx context.Context) (*statelessServerSession, error) {
+	cookie, err := GetIncomingCookieByName(ctx, StatelessSessionCookieName)
+	if err != nil {
+		return nil, err
+	}
+
+	return DecodeStatelessToken(cookie.Value)
+}
+
+func GetIncomingCookieByName(ctx context.Context, name string) (http.Cookie, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return "", fmt.Errorf("no metadata found for incoming context")
+		return http.Cookie{}, fmt.Errorf("no metadata found for incoming context")
 	}
 
 	header := make(http.Header, md.Len())
@@ -67,12 +89,44 @@ func GetSessionIDFromIncomingCookie(ctx context.Context) (string, error) {
 		}
 	}
 
-	sessionCookie, err := (&http.Request{Header: header}).Cookie(SessionCookieName)
+	cookie, err := (&http.Request{Header: header}).Cookie(name)
 	if err != nil {
-		return "", err
+		return http.Cookie{}, err
 	}
 
-	return sessionCookie.Value, nil
+	if cookie == nil {
+		return http.Cookie{}, fmt.Errorf("failed to get cookie with name: %s", name)
+	}
+
+	return *cookie, nil
+}
+
+func CreateCookieForSession(session ServerSession) (http.Cookie, error) {
+	var key string
+
+	if session == nil {
+		return http.Cookie{}, ErrNoSession
+	}
+
+	switch s := session.(type) {
+	case *statefulServerSession:
+		key = SessionCookieName
+	case *statelessServerSession:
+		key = StatelessSessionCookieName
+	default:
+		return http.Cookie{}, fmt.Errorf("cannot serialize session of type %T as cookie", s)
+	}
+
+	req := http.Request{Header: http.Header{"Cookie": []string{fmt.Sprintf("%s=%s", key, session.Token())}}}
+	cookie, err := req.Cookie(key) // TODO: one line
+	if err != nil {
+		return http.Cookie{}, err
+	}
+	if cookie == nil {
+		return http.Cookie{}, fmt.Errorf("failed to construct cookie for session: %s", session.Token())
+	}
+
+	return *cookie, nil
 }
 
 // Persistence of ServerSession instances for stateful session implementations
@@ -93,8 +147,10 @@ type SessionFactory interface {
 
 // Container for named SessionOptionValues
 type ServerSession interface {
-	// Get the unique identifier of the session
-	GetID() string
+	// An identifier for the session that the server can use to reconstruct
+	// the session state on future requests. It is the responsibility of
+	// each implementation to define the token's semantics.
+	Token() string
 	// Get session option value by name, or nil if it does not exist
 	GetSessionOption(name string) *SessionOptionValue
 	// Get a copy of the session options
@@ -111,7 +167,7 @@ type ServerSession interface {
 
 // Handles session lifecycle management
 type ServerSessionManager interface {
-	// Create and persist a new, empty ServerSession
+	// Create a new, empty ServerSession
 	CreateSession(ctx context.Context) (ServerSession, error)
 	// Get the current ServerSession, if one exists
 	GetSession(ctx context.Context) (ServerSession, error)
@@ -142,7 +198,7 @@ func (store *sessionStore) Get(id string) (ServerSession, error) {
 func (store *sessionStore) Put(session ServerSession) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	store.sessions[session.GetID()] = session
+	store.sessions[session.Token()] = session
 	return nil
 }
 
@@ -165,22 +221,67 @@ type sessionFactory struct {
 }
 
 func (factory *sessionFactory) CreateSession() (ServerSession, error) {
-	return &serverSession{
-		id:      factory.generateID(),
-		options: make(map[string]*SessionOptionValue),
+	return &statefulServerSession{
+		id:            factory.generateID(),
+		serverSession: serverSession{options: make(map[string]*SessionOptionValue)},
+	}, nil
+}
+
+type statefulServerSession struct {
+	serverSession
+	id string
+}
+
+func (session *statefulServerSession) Token() string {
+	return session.id
+}
+
+func NewStatelessServerSession() *statelessServerSession {
+	return &statelessServerSession{
+		serverSession: serverSession{options: make(map[string]*SessionOptionValue)},
+	}
+}
+
+type statelessServerSession struct {
+	serverSession
+}
+
+func (session *statelessServerSession) Token() string {
+	payload := GetSessionOptionsResult{SessionOptions: session.options}
+	b, err := proto.Marshal(&payload)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal stateless token: %s", err))
+	}
+
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func DecodeStatelessToken(token string) (*statelessServerSession, error) {
+	decoded, err := base64.StdEncoding.DecodeString(token)
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed GetSessionOptionsResult
+	if err := proto.Unmarshal(decoded, &parsed); err != nil {
+		return nil, err
+	}
+
+	options := parsed.SessionOptions
+	if options == nil {
+		options = make(map[string]*SessionOptionValue)
+	}
+
+	return &statelessServerSession{
+		serverSession: serverSession{options: options},
 	}, nil
 }
 
 type serverSession struct {
-	id     string
 	closed bool
 
 	options map[string]*SessionOptionValue
 	mu      sync.RWMutex
-}
-
-func (session *serverSession) GetID() string {
-	return session.id
 }
 
 func (session *serverSession) GetSessionOption(name string) *SessionOptionValue {
@@ -306,9 +407,43 @@ func (manager *serverSessionManager) GetSession(ctx context.Context) (ServerSess
 }
 
 func (manager *serverSessionManager) CloseSession(session ServerSession) error {
-	if err := manager.store.Remove(session.GetID()); err != nil {
+	if err := manager.store.Remove(session.Token()); err != nil {
 		return fmt.Errorf("failed to remove server session from store: %w", err)
 	}
+	return nil
+}
+
+// Create a new ServerSessionManager
+// If unset via options, the default factory produces sessions with UUIDs.
+// If unset via options, sessions are stored in-memory.
+func NewStatelessServerSessionManager() *statelessServerSessionManager {
+	return &statelessServerSessionManager{}
+}
+
+type statelessServerSessionManager struct{}
+
+func (manager *statelessServerSessionManager) CreateSession(ctx context.Context) (ServerSession, error) {
+	return NewStatelessServerSession(), nil
+}
+
+func (manager *statelessServerSessionManager) GetSession(ctx context.Context) (ServerSession, error) {
+	session, err := GetSessionFromContext(ctx)
+	if err == nil {
+		return session, nil
+	}
+
+	session, err = GetSessionFromIncomingCookie(ctx)
+	if err == nil {
+		return session, err
+	}
+	if err == http.ErrNoCookie {
+		return nil, ErrNoSession
+	}
+
+	return nil, fmt.Errorf("failed to get current session from cookie: %w", err)
+}
+
+func (manager *statelessServerSessionManager) CloseSession(session ServerSession) error {
 	return nil
 }
 
@@ -343,20 +478,44 @@ func (middleware *serverSessionMiddleware) StartCall(ctx context.Context) contex
 		panic(err)
 	}
 
-	grpc.SetHeader(ctx, metadata.Pairs("Set-Cookie", fmt.Sprintf("%s=%s", SessionCookieName, session.GetID())))
 	return NewSessionContext(ctx, session)
 }
 
+// Determine if the session state has changed. If it has then we need to inform the client
+// with a new cookie. The cookie is sent in the gRPC trailer because we would like to
+// determine its contents based on the final state the session at the end of the RPC call.
 func (middleware *serverSessionMiddleware) CallCompleted(ctx context.Context, _ error) {
 	session, err := middleware.manager.GetSession(ctx)
 	if err != nil {
 		panic(fmt.Sprintf("failed to get server session: %s", err))
 	}
 
+	sessionCookie, err := CreateCookieForSession(session)
+	if err != nil {
+		panic(err)
+	}
+
+	clientCookie, err := GetIncomingCookieByName(ctx, sessionCookie.Name)
+	if err == http.ErrNoCookie {
+		grpc.SetTrailer(ctx, metadata.Pairs("Set-Cookie", sessionCookie.String()))
+		return
+	}
+
+	if err != nil {
+		panic(err)
+	}
+
 	if session.Closed() {
-		grpc.SetTrailer(ctx, metadata.Pairs("Set-Cookie", fmt.Sprintf("%s=%s; Max-Age=0", SessionCookieName, session.GetID())))
+		clientCookie.MaxAge = -1
+		grpc.SetTrailer(ctx, metadata.Pairs("Set-Cookie", clientCookie.String()))
+
 		if err = middleware.manager.CloseSession(session); err != nil {
 			panic(fmt.Sprintf("failed to close server session: %s", err))
 		}
+		return
+	}
+
+	if sessionCookie.String() != clientCookie.String() {
+		grpc.SetTrailer(ctx, metadata.Pairs("Set-Cookie", sessionCookie.String()))
 	}
 }

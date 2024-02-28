@@ -122,6 +122,8 @@ func NewSessionOptionValue(value any) (flight.SessionOptionValue, error) {
 	switch val := value.(type) {
 	case string:
 		return flight.SessionOptionValue{OptionValue: &flight.SessionOptionValue_StringValue{StringValue: val}}, nil
+	case bool:
+		return flight.SessionOptionValue{OptionValue: &flight.SessionOptionValue_BoolValue{BoolValue: val}}, nil
 	case int64:
 		return flight.SessionOptionValue{OptionValue: &flight.SessionOptionValue_Int64Value{Int64Value: val}}, nil
 	case float64:
