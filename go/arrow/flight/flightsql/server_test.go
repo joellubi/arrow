@@ -696,7 +696,7 @@ func (s *FlightSqlServerSessionSuite) TestCloseSession() {
 func TestBaseServer(t *testing.T) {
 	suite.Run(t, new(UnimplementedFlightSqlServerSuite))
 	suite.Run(t, new(FlightSqlServerSuite))
-	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: session.NewServerSessionManager()})
+	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: session.NewStatefulServerSessionManager()})
 	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: session.NewStatelessServerSessionManager()})
 }
 
@@ -716,7 +716,7 @@ func TestServerSession(t *testing.T) {
 
 	factory := session.NewSessionFactory(sessionIDGenerator([]string{"how-now-brown-cow", "unique-new-york"}))
 	store := session.NewSessionStore()
-	manager := session.NewServerSessionManager(session.WithFactory(factory), session.WithStore(store))
+	manager := session.NewStatefulServerSessionManager(session.WithFactory(factory), session.WithStore(store))
 	middleware := session.NewServerSessionMiddleware(manager)
 
 	srv := flight.NewServerWithMiddleware([]flight.ServerMiddleware{
