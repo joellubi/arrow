@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow/go/v16/arrow/flight"
 	"github.com/apache/arrow/go/v16/arrow/flight/flightsql"
 	pb "github.com/apache/arrow/go/v16/arrow/flight/gen/flight"
+	"github.com/apache/arrow/go/v16/arrow/flight/session"
 	"github.com/apache/arrow/go/v16/arrow/memory"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -133,7 +134,7 @@ func (*testServer) DoGetStatement(ctx context.Context, ticket flightsql.Statemen
 }
 
 func (*testServer) SetSessionOptions(ctx context.Context, req *flight.SetSessionOptionsRequest) (*flight.SetSessionOptionsResult, error) {
-	session, err := flight.GetSessionFromContext(ctx)
+	session, err := session.GetSessionFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +157,7 @@ func (*testServer) SetSessionOptions(ctx context.Context, req *flight.SetSession
 }
 
 func (*testServer) GetSessionOptions(ctx context.Context, req *flight.GetSessionOptionsRequest) (*flight.GetSessionOptionsResult, error) {
-	session, err := flight.GetSessionFromContext(ctx)
+	session, err := session.GetSessionFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +166,7 @@ func (*testServer) GetSessionOptions(ctx context.Context, req *flight.GetSession
 }
 
 func (*testServer) CloseSession(ctx context.Context, req *flight.CloseSessionRequest) (*flight.CloseSessionResult, error) {
-	session, err := flight.GetSessionFromContext(ctx)
+	session, err := session.GetSessionFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +187,7 @@ type FlightSqlServerSuite struct {
 
 func (s *FlightSqlServerSuite) SetupSuite() {
 	s.s = flight.NewServerWithMiddleware([]flight.ServerMiddleware{
-		flight.CreateServerMiddleware(flight.NewServerSessionMiddleware(nil)),
+		flight.CreateServerMiddleware(session.NewServerSessionMiddleware(nil)),
 	})
 	srv := flightsql.NewFlightServer(&testServer{})
 	s.s.RegisterFlightService(srv)
@@ -531,12 +532,12 @@ type FlightSqlServerSessionSuite struct {
 	s  flight.Server
 	cl *flightsql.Client
 
-	sessionManager flight.ServerSessionManager
+	sessionManager session.ServerSessionManager
 }
 
 func (s *FlightSqlServerSessionSuite) SetupSuite() {
 	s.s = flight.NewServerWithMiddleware([]flight.ServerMiddleware{
-		flight.CreateServerMiddleware(flight.NewServerSessionMiddleware(s.sessionManager)),
+		flight.CreateServerMiddleware(session.NewServerSessionMiddleware(s.sessionManager)),
 	})
 	srv := flightsql.NewFlightServer(&testServer{})
 	s.s.RegisterFlightService(srv)
@@ -695,8 +696,8 @@ func (s *FlightSqlServerSessionSuite) TestCloseSession() {
 func TestBaseServer(t *testing.T) {
 	suite.Run(t, new(UnimplementedFlightSqlServerSuite))
 	suite.Run(t, new(FlightSqlServerSuite))
-	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: flight.NewServerSessionManager()})
-	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: flight.NewStatelessServerSessionManager()})
+	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: session.NewServerSessionManager()})
+	suite.Run(t, &FlightSqlServerSessionSuite{sessionManager: session.NewStatelessServerSessionManager()})
 }
 
 func TestServerSession(t *testing.T) {
@@ -713,10 +714,10 @@ func TestServerSession(t *testing.T) {
 		}
 	}
 
-	factory := flight.NewSessionFactory(sessionIDGenerator([]string{"how-now-brown-cow", "unique-new-york"}))
-	store := flight.NewSessionStore()
-	manager := flight.NewServerSessionManager(flight.WithFactory(factory), flight.WithStore(store))
-	middleware := flight.NewServerSessionMiddleware(manager)
+	factory := session.NewSessionFactory(sessionIDGenerator([]string{"how-now-brown-cow", "unique-new-york"}))
+	store := session.NewSessionStore()
+	manager := session.NewServerSessionManager(session.WithFactory(factory), session.WithStore(store))
+	middleware := session.NewServerSessionMiddleware(manager)
 
 	srv := flight.NewServerWithMiddleware([]flight.ServerMiddleware{
 		flight.CreateServerMiddleware(middleware),
@@ -740,7 +741,7 @@ func TestServerSession(t *testing.T) {
 
 	var (
 		trailer metadata.MD
-		session flight.ServerSession
+		session session.ServerSession
 	)
 
 	ctx := context.TODO()
@@ -819,8 +820,8 @@ func TestServerSession(t *testing.T) {
 }
 
 func TestStatelessServerSession(t *testing.T) {
-	manager := flight.NewStatelessServerSessionManager()
-	middleware := flight.NewServerSessionMiddleware(manager)
+	manager := session.NewStatelessServerSessionManager()
+	middleware := session.NewServerSessionMiddleware(manager)
 
 	srv := flight.NewServerWithMiddleware([]flight.ServerMiddleware{
 		flight.CreateServerMiddleware(middleware),

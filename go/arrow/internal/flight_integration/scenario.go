@@ -36,6 +36,7 @@ import (
 	"github.com/apache/arrow/go/v16/arrow/flight"
 	"github.com/apache/arrow/go/v16/arrow/flight/flightsql"
 	"github.com/apache/arrow/go/v16/arrow/flight/flightsql/schema_ref"
+	"github.com/apache/arrow/go/v16/arrow/flight/session"
 	"github.com/apache/arrow/go/v16/arrow/internal/arrjson"
 	"github.com/apache/arrow/go/v16/arrow/ipc"
 	"github.com/apache/arrow/go/v16/arrow/memory"
@@ -2644,7 +2645,7 @@ type sessionOptionsScenarioTester struct {
 
 func (tester *sessionOptionsScenarioTester) MakeServer(port int) flight.Server {
 	srv := flight.NewServerWithMiddleware([]flight.ServerMiddleware{
-		flight.CreateServerMiddleware(flight.NewServerSessionMiddleware(nil)),
+		flight.CreateServerMiddleware(session.NewServerSessionMiddleware(nil)),
 	})
 
 	srv.RegisterFlightService(flightsql.NewFlightServer(tester))
@@ -2653,7 +2654,7 @@ func (tester *sessionOptionsScenarioTester) MakeServer(port int) flight.Server {
 }
 
 func (tester *sessionOptionsScenarioTester) SetSessionOptions(ctx context.Context, req *flight.SetSessionOptionsRequest) (*flight.SetSessionOptionsResult, error) {
-	session, err := flight.GetSessionFromContext(ctx)
+	session, err := session.GetSessionFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2676,7 +2677,7 @@ func (tester *sessionOptionsScenarioTester) SetSessionOptions(ctx context.Contex
 }
 
 func (tester *sessionOptionsScenarioTester) GetSessionOptions(ctx context.Context, req *flight.GetSessionOptionsRequest) (*flight.GetSessionOptionsResult, error) {
-	session, err := flight.GetSessionFromContext(ctx)
+	session, err := session.GetSessionFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2685,7 +2686,7 @@ func (tester *sessionOptionsScenarioTester) GetSessionOptions(ctx context.Contex
 }
 
 func (tester *sessionOptionsScenarioTester) CloseSession(ctx context.Context, req *flight.CloseSessionRequest) (*flight.CloseSessionResult, error) {
-	session, err := flight.GetSessionFromContext(ctx)
+	session, err := session.GetSessionFromContext(ctx)
 	if err != nil {
 		return nil, err
 	}

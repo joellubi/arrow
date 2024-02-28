@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package flight
+package session
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/apache/arrow/go/v16/arrow/flight"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -152,11 +153,11 @@ type ServerSession interface {
 	// each implementation to define the token's semantics.
 	Token() string
 	// Get session option value by name, or nil if it does not exist
-	GetSessionOption(name string) *SessionOptionValue
+	GetSessionOption(name string) *flight.SessionOptionValue
 	// Get a copy of the session options
-	GetSessionOptions() map[string]*SessionOptionValue
+	GetSessionOptions() map[string]*flight.SessionOptionValue
 	// Set session option by name to given value
-	SetSessionOption(name string, value *SessionOptionValue)
+	SetSessionOption(name string, value *flight.SessionOptionValue)
 	// Idempotently remove name from this session
 	EraseSessionOption(name string)
 	// Close the session
@@ -223,7 +224,7 @@ type sessionFactory struct {
 func (factory *sessionFactory) CreateSession() (ServerSession, error) {
 	return &statefulServerSession{
 		id:            factory.generateID(),
-		serverSession: serverSession{options: make(map[string]*SessionOptionValue)},
+		serverSession: serverSession{options: make(map[string]*flight.SessionOptionValue)},
 	}, nil
 }
 
@@ -238,7 +239,7 @@ func (session *statefulServerSession) Token() string {
 
 func NewStatelessServerSession() *statelessServerSession {
 	return &statelessServerSession{
-		serverSession: serverSession{options: make(map[string]*SessionOptionValue)},
+		serverSession: serverSession{options: make(map[string]*flight.SessionOptionValue)},
 	}
 }
 
@@ -247,7 +248,7 @@ type statelessServerSession struct {
 }
 
 func (session *statelessServerSession) Token() string {
-	payload := GetSessionOptionsResult{SessionOptions: session.options}
+	payload := flight.GetSessionOptionsResult{SessionOptions: session.options}
 	b, err := proto.Marshal(&payload)
 	if err != nil {
 		panic(fmt.Sprintf("failed to marshal stateless token: %s", err))
@@ -262,14 +263,14 @@ func DecodeStatelessToken(token string) (*statelessServerSession, error) {
 		return nil, err
 	}
 
-	var parsed GetSessionOptionsResult
+	var parsed flight.GetSessionOptionsResult
 	if err := proto.Unmarshal(decoded, &parsed); err != nil {
 		return nil, err
 	}
 
 	options := parsed.SessionOptions
 	if options == nil {
-		options = make(map[string]*SessionOptionValue)
+		options = make(map[string]*flight.SessionOptionValue)
 	}
 
 	return &statelessServerSession{
@@ -280,11 +281,11 @@ func DecodeStatelessToken(token string) (*statelessServerSession, error) {
 type serverSession struct {
 	closed bool
 
-	options map[string]*SessionOptionValue
+	options map[string]*flight.SessionOptionValue
 	mu      sync.RWMutex
 }
 
-func (session *serverSession) GetSessionOption(name string) *SessionOptionValue {
+func (session *serverSession) GetSessionOption(name string) *flight.SessionOptionValue {
 	session.mu.RLock()
 	defer session.mu.RUnlock()
 	value, found := session.options[name]
@@ -295,8 +296,8 @@ func (session *serverSession) GetSessionOption(name string) *SessionOptionValue 
 	return value
 }
 
-func (session *serverSession) GetSessionOptions() map[string]*SessionOptionValue {
-	options := make(map[string]*SessionOptionValue, len(session.options))
+func (session *serverSession) GetSessionOptions() map[string]*flight.SessionOptionValue {
+	options := make(map[string]*flight.SessionOptionValue, len(session.options))
 
 	session.mu.RLock()
 	defer session.mu.RUnlock()
@@ -307,7 +308,7 @@ func (session *serverSession) GetSessionOptions() map[string]*SessionOptionValue
 	return options
 }
 
-func (session *serverSession) SetSessionOption(name string, value *SessionOptionValue) {
+func (session *serverSession) SetSessionOption(name string, value *flight.SessionOptionValue) {
 	if value.GetOptionValue() == nil {
 		session.EraseSessionOption(name)
 		return
@@ -463,6 +464,8 @@ type serverSessionMiddleware struct {
 	manager ServerSessionManager
 }
 
+// Get the existing session if one is found, otherwise create one. The resulting context will contain
+// the session at a well-known key for any internal RPC methods to read/update.
 func (middleware *serverSessionMiddleware) StartCall(ctx context.Context) context.Context {
 	session, err := middleware.manager.GetSession(ctx)
 	if err == nil {
@@ -477,6 +480,16 @@ func (middleware *serverSessionMiddleware) StartCall(ctx context.Context) contex
 	if err != nil {
 		panic(err)
 	}
+
+	// TODO(joellubi): Remove this once Java clients support receiving cookies in gRPC trailer.
+	// Currently, both C++ and Go client cookie middlewares merge the header and trailer when setting cookies.
+	// Java middleware checks the metadata in the header, but only reads the trailer when there is an error.
+	// It is far simpler to only set cookies in the trailer, especially for streaming RPC.
+	sessionCookie, err := CreateCookieForSession(session)
+	if err != nil {
+		panic(err)
+	}
+	grpc.SetHeader(ctx, metadata.Pairs("Set-Cookie", sessionCookie.String()))
 
 	return NewSessionContext(ctx, session)
 }
